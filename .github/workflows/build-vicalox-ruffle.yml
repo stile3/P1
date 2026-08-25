@@ -25,6 +25,7 @@ jobs:
           cp vicalox-ruffle/WorkerDomain.as ruffle-src/core/src/avm2/globals/flash/system/WorkerDomain.as
           python3 vicalox-ruffle/apply_v10.py
           python3 vicalox-ruffle/fix_v10_exhaustive.py
+          python3 vicalox-ruffle/fix_v10_culling_compile.py
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
