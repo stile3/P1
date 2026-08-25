@@ -25,6 +25,36 @@ jobs:
           cp vicalox-ruffle/WorkerDomain.as ruffle-src/core/src/avm2/globals/flash/system/WorkerDomain.as
           echo 'Applied Vicalox cooperative Worker runtime'
 
+      - name: Apply Vicalox AGAL2 Stage3D limits
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          # Adobe AGAL2 allows vc0..vc249 and fc0..fc63.
+          # Ruffle 0.5.0 still allocates only the AGAL1 limits (128 / 28),
+          # which makes Flare3D shaders such as vc221 fail Naga/WGPU validation.
+          builder = Path('ruffle-src/render/naga-agal/src/builder.rs')
+          text = builder.read_text()
+          old = '''const VERTEX_PROGRAM_CONSTANTS: u64 = 128;\nconst FRAGMENT_PROGRAM_CONSTANTS: u64 = 28;'''
+          new = '''// Vicalox: allocate the full AGAL2 register space.\n// This is safe for AGAL1 programs: their bytecode still only addresses the\n// smaller register range, but the backing uniform array is large enough for\n// legacy Flare3D AGAL2 shaders.\nconst VERTEX_PROGRAM_CONSTANTS: u64 = 250;\nconst FRAGMENT_PROGRAM_CONSTANTS: u64 = 64;'''
+          if old not in text:
+              raise SystemExit('builder.rs constant block not found')
+          builder.write_text(text.replace(old, new, 1))
+
+          pipeline = Path('ruffle-src/render/wgpu/src/context3d/current_pipeline.rs')
+          text = pipeline.read_text()
+          old = '''const AGAL_NUM_VERTEX_CONSTANTS: u64 = 128;\nconst AGAL_NUM_FRAGMENT_CONSTANTS: u64 = 28;'''
+          new = '''// Vicalox: full AGAL2 constant register buffers (vc0..vc249 / fc0..fc63).\nconst AGAL_NUM_VERTEX_CONSTANTS: u64 = 250;\nconst AGAL_NUM_FRAGMENT_CONSTANTS: u64 = 64;'''
+          if old not in text:
+              raise SystemExit('current_pipeline.rs constant block not found')
+          pipeline.write_text(text.replace(old, new, 1))
+
+          print('Applied AGAL2 constants: vertex=250 fragment=64')
+          PY
+
+          grep -n 'VERTEX_PROGRAM_CONSTANTS\|FRAGMENT_PROGRAM_CONSTANTS' ruffle-src/render/naga-agal/src/builder.rs
+          grep -n 'AGAL_NUM_VERTEX_CONSTANTS\|AGAL_NUM_FRAGMENT_CONSTANTS' ruffle-src/render/wgpu/src/context3d/current_pipeline.rs
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
@@ -62,6 +92,6 @@ jobs:
       - name: Upload Vicalox Ruffle
         uses: actions/upload-artifact@v4
         with:
-          name: VicaloxRuffle-WorkerEdition
+          name: VicaloxRuffle-WorkerEdition-AGAL2
           path: ruffle-src/web/packages/selfhosted/dist
           if-no-files-found: error
