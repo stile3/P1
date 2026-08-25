@@ -30,13 +30,10 @@ jobs:
           python3 - <<'PY'
           from pathlib import Path
 
-          # Adobe AGAL2 allows vc0..vc249 and fc0..fc63.
-          # Ruffle 0.5.0 still allocates only the AGAL1 limits (128 / 28),
-          # which makes Flare3D shaders such as vc221 fail Naga/WGPU validation.
           builder = Path('ruffle-src/render/naga-agal/src/builder.rs')
           text = builder.read_text()
           old = '''const VERTEX_PROGRAM_CONSTANTS: u64 = 128;\nconst FRAGMENT_PROGRAM_CONSTANTS: u64 = 28;'''
-          new = '''// Vicalox: allocate the full AGAL2 register space.\n// This is safe for AGAL1 programs: their bytecode still only addresses the\n// smaller register range, but the backing uniform array is large enough for\n// legacy Flare3D AGAL2 shaders.\nconst VERTEX_PROGRAM_CONSTANTS: u64 = 250;\nconst FRAGMENT_PROGRAM_CONSTANTS: u64 = 64;'''
+          new = '''// Vicalox: full AGAL2 register space.\nconst VERTEX_PROGRAM_CONSTANTS: u64 = 250;\nconst FRAGMENT_PROGRAM_CONSTANTS: u64 = 64;'''
           if old not in text:
               raise SystemExit('builder.rs constant block not found')
           builder.write_text(text.replace(old, new, 1))
@@ -44,16 +41,51 @@ jobs:
           pipeline = Path('ruffle-src/render/wgpu/src/context3d/current_pipeline.rs')
           text = pipeline.read_text()
           old = '''const AGAL_NUM_VERTEX_CONSTANTS: u64 = 128;\nconst AGAL_NUM_FRAGMENT_CONSTANTS: u64 = 28;'''
-          new = '''// Vicalox: full AGAL2 constant register buffers (vc0..vc249 / fc0..fc63).\nconst AGAL_NUM_VERTEX_CONSTANTS: u64 = 250;\nconst AGAL_NUM_FRAGMENT_CONSTANTS: u64 = 64;'''
+          new = '''// Vicalox: full AGAL2 constant buffers.\nconst AGAL_NUM_VERTEX_CONSTANTS: u64 = 250;\nconst AGAL_NUM_FRAGMENT_CONSTANTS: u64 = 64;'''
           if old not in text:
               raise SystemExit('current_pipeline.rs constant block not found')
           pipeline.write_text(text.replace(old, new, 1))
-
           print('Applied AGAL2 constants: vertex=250 fragment=64')
           PY
 
-          grep -n 'VERTEX_PROGRAM_CONSTANTS\|FRAGMENT_PROGRAM_CONSTANTS' ruffle-src/render/naga-agal/src/builder.rs
-          grep -n 'AGAL_NUM_VERTEX_CONSTANTS\|AGAL_NUM_FRAGMENT_CONSTANTS' ruffle-src/render/wgpu/src/context3d/current_pipeline.rs
+      - name: Apply Vicalox Flash API compatibility
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          # Matrix3D.interpolateTo is used continuously by Flare3D animation and skinning.
+          # Ruffle 0.5.0 does not expose it, so the MU client throws Error #1069.
+          matrix = Path('ruffle-src/core/src/avm2/globals/flash/geom/Matrix3D.as')
+          text = matrix.read_text()
+          if 'function interpolateTo(' not in text:
+              anchor = '        public function append(lhs:Matrix3D):void {'
+              method = '''        // Vicalox/Flare3D compatibility.\n        // Flash exposes Matrix3D.interpolateTo; OpenFL uses component-wise\n        // interpolation for this API and it matches the legacy client usage.\n        public function interpolateTo(toMat:Matrix3D, percent:Number):void {\n            if (toMat == null) {\n                throw new TypeError("Error #2007: Parameter toMat must be non-null.", 2007);\n            }\n            for (var i:int = 0; i < 16; i++) {\n                this._rawData[i] = this._rawData[i] + (toMat._rawData[i] - this._rawData[i]) * percent;\n            }\n        }\n\n        public static function interpolate(thisMat:Matrix3D, toMat:Matrix3D, percent:Number):Matrix3D {\n            if (thisMat == null || toMat == null) {\n                throw new TypeError("Error #2007: Parameter must be non-null.", 2007);\n            }\n            var out:Matrix3D = new Matrix3D(thisMat._rawData);\n            out.interpolateTo(toMat, percent);\n            return out;\n        }\n\n'''
+              if anchor not in text:
+                  raise SystemExit('Matrix3D append anchor not found')
+              matrix.write_text(text.replace(anchor, method + anchor, 1))
+              print('Added Matrix3D.interpolateTo + interpolate')
+          else:
+              print('Matrix3D.interpolateTo already present')
+
+          # releaseLineCreationData only releases internal composition caches in Flash.
+          # Ruffle's TextBlock implementation has no equivalent retained creation data;
+          # a no-op is therefore the correct compatibility behavior for this client.
+          tb = Path('ruffle-src/core/src/avm2/globals/flash/text/engine/TextBlock.as')
+          text = tb.read_text()
+          if 'function releaseLineCreationData(' not in text:
+              anchor = '        public function releaseLines(start:TextLine, end:TextLine):void {'
+              method = '''        public function releaseLineCreationData():void {\n            // No retained line-creation cache in Ruffle.\n        }\n\n'''
+              if anchor not in text:
+                  raise SystemExit('TextBlock releaseLines anchor not found')
+              tb.write_text(text.replace(anchor, method + anchor, 1))
+              print('Added TextBlock.releaseLineCreationData')
+          else:
+              print('TextBlock.releaseLineCreationData already present')
+          PY
+
+          grep -n 'interpolateTo\|releaseLineCreationData' \
+            ruffle-src/core/src/avm2/globals/flash/geom/Matrix3D.as \
+            ruffle-src/core/src/avm2/globals/flash/text/engine/TextBlock.as
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -92,6 +124,6 @@ jobs:
       - name: Upload Vicalox Ruffle
         uses: actions/upload-artifact@v4
         with:
-          name: VicaloxRuffle-WorkerEdition-AGAL2
+          name: VicaloxRuffle-V9-FlareCompat
           path: ruffle-src/web/packages/selfhosted/dist
           if-no-files-found: error
