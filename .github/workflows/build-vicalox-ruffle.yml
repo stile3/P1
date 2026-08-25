@@ -1,0 +1,67 @@
+name: Build Vicalox Ruffle
+
+on:
+  push:
+    paths:
+      - 'vicalox-ruffle/**'
+      - '.github/workflows/build-vicalox-ruffle.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout Ruffle 0.5.0 source
+        run: |
+          git clone https://github.com/ruffle-rs/ruffle.git ruffle-src
+          cd ruffle-src
+          git checkout a4f5b5256e245693bc9077ef6c6b6abc95490e7f
+
+      - name: Apply Vicalox Worker compatibility
+        run: |
+          cp vicalox-ruffle/Worker.as ruffle-src/core/src/avm2/globals/flash/system/Worker.as
+          cp vicalox-ruffle/WorkerDomain.as ruffle-src/core/src/avm2/globals/flash/system/WorkerDomain.as
+          echo 'Applied Vicalox cooperative Worker runtime'
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: ruffle-src/web/package-lock.json
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ruffle-src
+
+      - name: Install wasm-bindgen
+        run: cargo install --locked wasm-bindgen-cli --version 0.2.120
+
+      - name: Build self-hosted Vicalox Ruffle
+        working-directory: ruffle-src/web
+        env:
+          CARGO_FLAGS: --all-features
+        run: |
+          npm ci
+          npm run build --workspace=ruffle-core
+          npm run build --workspace=ruffle-selfhosted
+
+      - name: Verify output
+        run: |
+          test -f ruffle-src/web/packages/selfhosted/dist/ruffle.js
+          find ruffle-src/web/packages/selfhosted/dist -maxdepth 1 -type f -printf '%f %s bytes\n'
+
+      - name: Upload Vicalox Ruffle
+        uses: actions/upload-artifact@v4
+        with:
+          name: VicaloxRuffle-WorkerEdition
+          path: ruffle-src/web/packages/selfhosted/dist
+          if-no-files-found: error
