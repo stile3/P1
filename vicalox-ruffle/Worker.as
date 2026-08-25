@@ -19,11 +19,21 @@ package flash.system {
         private static var _active:Worker;
         private static var _queue:Array = [];
 
+        // Vicalox V11 Turbo:
+        // Real Flash ran each Worker on another thread. Ruffle currently runs our
+        // compatibility workers inside the same AVM2 thread. Running two separate
+        // 30 FPS timers therefore causes two expensive worker bursts on top of the
+        // 30 FPS render loop. Use one 30 Hz scheduler and alternate workers. With
+        // two MU workers each worker receives 15 ENTER_FRAME ticks/sec, while the
+        // main game keeps its original 30 FPS render rate.
+        private static var _runningWorkers:Array = [];
+        private static var _scheduler:Timer;
+        private static var _schedulerCursor:int = 0;
+
         private var _swf:ByteArray;
         private var _shared:Object;
         private var _state:String;
         private var _loader:Loader;
-        private var _timer:Timer;
 
         public static function get isSupported():Boolean {
             return true;
@@ -115,20 +125,55 @@ package flash.system {
 
         private function workerComplete(event:Event):void {
             cleanupLoaderListeners();
-
             _state = WorkerState.RUNNING;
 
-            // The original MU workers use ENTER_FRAME as their cooperative loop.
-            // They do not need a visible display list: dispatch the event ourselves.
-            _timer = new Timer(1000.0 / 30.0);
-            _timer.addEventListener(TimerEvent.TIMER, workerTick);
-            _timer.start();
+            _runningWorkers.push(this);
+            ensureScheduler();
 
             _current = ensurePrimordial();
             dispatchEvent(new Event(Event.WORKER_STATE));
 
             _active = null;
             pumpQueue();
+        }
+
+        private static function ensureScheduler():void {
+            if (_scheduler) {
+                return;
+            }
+            _scheduler = new Timer(1000.0 / 30.0);
+            _scheduler.addEventListener(TimerEvent.TIMER, schedulerTick);
+            _scheduler.start();
+        }
+
+        private static function schedulerTick(event:TimerEvent):void {
+            if (_runningWorkers.length == 0) {
+                return;
+            }
+            if (_schedulerCursor >= _runningWorkers.length) {
+                _schedulerCursor = 0;
+            }
+
+            var worker:Worker = _runningWorkers[_schedulerCursor] as Worker;
+            _schedulerCursor++;
+            if (_schedulerCursor >= _runningWorkers.length) {
+                _schedulerCursor = 0;
+            }
+
+            if (worker) {
+                _current = worker;
+                try {
+                    worker.tickOnce();
+                } finally {
+                    _current = ensurePrimordial();
+                }
+            }
+        }
+
+        private function tickOnce():void {
+            if (_loader && _loader.content && _state == WorkerState.RUNNING) {
+                _loader.content.dispatchEvent(new Event(Event.ENTER_FRAME));
+            }
         }
 
         private function workerError(event:Event):void {
@@ -147,12 +192,6 @@ package flash.system {
             _loader.contentLoaderInfo.removeEventListener(Event.COMPLETE, workerComplete);
             _loader.contentLoaderInfo.removeEventListener(IOErrorEvent.IO_ERROR, workerError);
             _loader.contentLoaderInfo.removeEventListener(SecurityErrorEvent.SECURITY_ERROR, workerError);
-        }
-
-        private function workerTick(event:TimerEvent):void {
-            if (_loader && _loader.content) {
-                _loader.content.dispatchEvent(new Event(Event.ENTER_FRAME));
-            }
         }
 
         private static native function instantiateInternal():Worker;
